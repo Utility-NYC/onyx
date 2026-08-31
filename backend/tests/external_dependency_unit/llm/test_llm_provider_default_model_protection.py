@@ -12,11 +12,11 @@ import pytest
 from sqlalchemy.orm import Session
 
 from onyx.db.llm import (
-    fetch_default_chat_naming_model,
+    fetch_default_contextual_rag_model,
     fetch_default_vision_model,
     fetch_existing_llm_provider,
     remove_llm_provider,
-    update_default_chat_naming_provider,
+    update_default_contextual_model,
     update_default_provider,
     update_default_vision_provider,
     upsert_llm_provider,
@@ -295,15 +295,24 @@ class TestCapabilityChangesCannotEraseADefault:
         assert default_vision is not None
         assert default_vision.name == "gpt-4o"
 
-    def test_chat_naming_default_survives_an_unrelated_provider_update(
+    def test_contextual_rag_default_survives_an_unrelated_provider_update(
         self,
         db_session: Session,
         provider_name: str,
     ) -> None:
-        """CHAT_NAMING is implied by no supports_* field, so it was never in
-        supported_flows and an ordinary update deleted the flow row."""
+        """CONTEXTUAL_RAG is implied by no supports_* field, so it was never in
+        supported_flows and an ordinary provider update deleted the flow row."""
         provider = _create_test_provider(db_session, provider_name)
-        update_default_chat_naming_provider(provider.id, "gpt-4o-mini", db_session)
+        model_config = next(
+            mc for mc in provider.model_configurations if mc.name == "gpt-4o-mini"
+        )
+        update_default_contextual_model(
+            db_session=db_session,
+            enable_contextual_rag=True,
+            model_configuration_id=model_config.id,
+        )
+        db_session.commit()
+        assert fetch_default_contextual_rag_model(db_session) is not None
 
         upsert_llm_provider(
             LLMProviderUpsertRequest(
@@ -324,9 +333,9 @@ class TestCapabilityChangesCannotEraseADefault:
             db_session=db_session,
         )
 
-        default_chat_naming = fetch_default_chat_naming_model(db_session)
-        assert default_chat_naming is not None
-        assert default_chat_naming.name == "gpt-4o-mini"
+        default_contextual = fetch_default_contextual_rag_model(db_session)
+        assert default_contextual is not None
+        assert default_contextual.name == "gpt-4o-mini"
 
     def test_disabling_vision_is_caught_when_one_model_holds_several_defaults(
         self,
