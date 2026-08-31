@@ -280,6 +280,60 @@ def upsert_cloud_embedding_provider(
     return CloudEmbeddingProvider.from_request(existing_provider)
 
 
+def _assert_defaults_survive_upsert(
+    db_session: Session,
+    existing_by_name: dict[str, ModelConfiguration],
+    removed_ids: list[int],
+    requested_visibility: dict[str, bool],
+    merged_capabilities: dict[str, set[LLMModelFlowType]],
+) -> None:
+    """Refuse a write that would erase a deployment default.
+
+    A default is stored as ``is_default`` on the ``LLMModelFlow`` row, so removing
+    the model, hiding it, or dropping the capability that flow represents each
+    delete it. Covers every flow, not just chat.
+    """
+    # One model commonly serves several flows — the chat default is often the
+    # vision default too — so this holds every flow it is the default for, not
+    # just the first one found.
+    defaults_by_model_id: dict[int, set[LLMModelFlowType]] = {}
+    for flow_type in LLMModelFlowType:
+        flow_default = fetch_default_model(db_session, flow_type)
+        if flow_default:
+            defaults_by_model_id.setdefault(flow_default.id, set()).add(flow_type)
+
+    for name, mc in existing_by_name.items():
+        default_flows = defaults_by_model_id.get(mc.id)
+        if not default_flows:
+            continue
+        flow_names = ", ".join(sorted(flow.value for flow in default_flows))
+        if mc.id in removed_ids:
+            raise ValueError(
+                f"Cannot remove '{name}': it is the deployment's "
+                f"{flow_names} default model. Change that default first."
+            )
+        if not requested_visibility.get(name, True):
+            raise ValueError(
+                f"Cannot hide '{name}': it is the deployment's "
+                f"{flow_names} default model. Change that default first."
+            )
+        if name in merged_capabilities:
+            for capability_flow in (
+                LLMModelFlowType.VISION,
+                LLMModelFlowType.REASONING,
+            ):
+                if (
+                    capability_flow in default_flows
+                    and capability_flow not in merged_capabilities[name]
+                ):
+                    raise ValueError(
+                        f"Cannot disable {capability_flow.value} support on "
+                        f"'{name}': it is the deployment's "
+                        f"{capability_flow.value} default model. Change that "
+                        "default first."
+                    )
+
+
 def upsert_llm_provider(
     llm_provider_upsert_request: LLMProviderUpsertRequest,
     db_session: Session,
@@ -377,38 +431,13 @@ def upsert_llm_provider(
         ]
     )
 
-    # Every flow that has a default, not just chat: the vision, contextual-RAG,
-    # reasoning and chat-naming defaults could be removed or hidden silently.
-    defaults_by_model_id: dict[int, LLMModelFlowType] = {}
-    for flow_type in LLMModelFlowType:
-        flow_default = fetch_default_model(db_session, flow_type)
-        if flow_default:
-            defaults_by_model_id.setdefault(flow_default.id, flow_type)
-
-    for name, mc in existing_by_name.items():
-        flow_type = defaults_by_model_id.get(mc.id)
-        if flow_type is None:
-            continue
-        if mc.id in removed_ids:
-            raise ValueError(
-                f"Cannot remove '{name}': it is the deployment's "
-                f"{flow_type.value} default model. Change that default first."
-            )
-        if not requested_visibility.get(name, True):
-            raise ValueError(
-                f"Cannot hide '{name}': it is the deployment's "
-                f"{flow_type.value} default model. Change that default first."
-            )
-        if (
-            name in merged_capabilities
-            and flow_type in (LLMModelFlowType.VISION, LLMModelFlowType.REASONING)
-            and flow_type not in merged_capabilities[name]
-        ):
-            raise ValueError(
-                f"Cannot disable {flow_type.value} support on '{name}': it is the "
-                f"deployment's {flow_type.value} default model. Change that "
-                "default first."
-            )
+    _assert_defaults_survive_upsert(
+        db_session=db_session,
+        existing_by_name=existing_by_name,
+        removed_ids=removed_ids,
+        requested_visibility=requested_visibility,
+        merged_capabilities=merged_capabilities,
+    )
 
     if removed_ids:
         db_session.query(ModelConfiguration).filter(
