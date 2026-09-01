@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session
 
 from onyx.db.llm import (
     fetch_default_contextual_rag_model,
+    fetch_default_craft_model,
     fetch_default_vision_model,
     fetch_existing_llm_provider,
     remove_llm_provider,
     update_default_contextual_model,
+    update_default_craft_provider,
     update_default_provider,
     update_default_vision_provider,
     upsert_llm_provider,
@@ -336,6 +338,41 @@ class TestCapabilityChangesCannotEraseADefault:
         default_contextual = fetch_default_contextual_rag_model(db_session)
         assert default_contextual is not None
         assert default_contextual.name == "gpt-4o-mini"
+
+    def test_craft_default_survives_an_unrelated_provider_update(
+        self,
+        db_session: Session,
+        provider_name: str,
+    ) -> None:
+        """CRAFT is a pointer flow like CONTEXTUAL_RAG, added in #14303. It is
+        never in supported_flows, so the unfiltered reconciliation deleted the
+        row and the workspace default went with it."""
+        provider = _create_test_provider(db_session, provider_name)
+        update_default_craft_provider(provider.id, "gpt-4o-mini", db_session)
+        assert fetch_default_craft_model(db_session) is not None
+
+        upsert_llm_provider(
+            LLMProviderUpsertRequest(
+                id=provider.id,
+                name=provider_name,
+                provider=LlmProviderNames.OPENAI,
+                api_key="sk-test-key-00000000000000000000000000000000000",
+                api_key_changed=True,
+                model_configurations=[
+                    ModelConfigurationUpsertRequest(
+                        name="gpt-4o", is_visible=True, supports_image_input=True
+                    ),
+                    ModelConfigurationUpsertRequest(
+                        name="gpt-4o-mini", is_visible=True, supports_image_input=False
+                    ),
+                ],
+            ),
+            db_session=db_session,
+        )
+
+        default_craft = fetch_default_craft_model(db_session)
+        assert default_craft is not None
+        assert default_craft.name == "gpt-4o-mini"
 
     def test_disabling_vision_is_caught_when_one_model_holds_several_defaults(
         self,

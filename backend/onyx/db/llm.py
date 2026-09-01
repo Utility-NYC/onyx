@@ -1440,11 +1440,11 @@ def update_model_configuration__no_commit(
         for flow_type in supported_flows
         if flow_type not in model_configuration.llm_model_flow_types
     }
-    # Only the capability-derived flows are reconciled here. CONTEXTUAL_RAG and
-    # CHAT_NAMING are set by their own endpoints and are implied by no supports_*
-    # field, so they are never in supported_flows — without this filter an
-    # ordinary provider update deletes them, and the deployment default each one
-    # carries goes with it.
+    # Only the capability-derived flows are reconciled here. The pointer flows —
+    # CONTEXTUAL_RAG, CHAT_NAMING and CRAFT — are set by their own endpoints and
+    # are implied by no supports_* field, so they are never in supported_flows.
+    # Without this filter an ordinary provider update deletes them, and the
+    # deployment default each one carries goes with it.
     reconciled_flows = {
         LLMModelFlowType.CHAT,
         LLMModelFlowType.VISION,
