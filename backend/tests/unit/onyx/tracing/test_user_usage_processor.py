@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import pytest
 
+from onyx.db.enums import SystemUsageAttribution
 from onyx.tracing.flows import LLMFlow
 from onyx.tracing.framework.span_data import (
     FunctionSpanData,
@@ -75,6 +76,7 @@ def processor(
     monkeypatch.setattr(proc_mod, "get_session_with_tenant", _fake_session)
     monkeypatch.setattr(proc_mod, "compute_cost_cents", lambda *_a, **_k: (1.0, 2.0))
     monkeypatch.setattr(proc_mod, "record_user_usage", _capture_record)
+    monkeypatch.setattr(proc_mod, "record_system_usage", _capture_record)
 
     p = UserUsageTracingProcessor(flush_interval_seconds=0.05)
     try:
@@ -198,10 +200,42 @@ def test_batch_aggregates_cache_creation_tokens(
     assert aggregated[0].cache_creation_tokens == 30
 
 
-def test_no_record_when_user_id_unset(
+def test_records_system_usage_when_user_id_unset(
     processor: UserUsageTracingProcessor, recorded_calls: list[dict[str, Any]]
 ) -> None:
-    processor.on_span_end(_generation_span(usage={"input_tokens": 5}))
+    processor.on_span_end(
+        _generation_span(
+            flow=LLMFlow.IMAGE_SUMMARIZATION.value,
+            usage={"input_tokens": 5, "output_tokens": 2},
+        )
+    )
+    processor.force_flush()
+    assert len(recorded_calls) == 1
+    assert recorded_calls[0]["attribution"] == SystemUsageAttribution.SYSTEM
+    assert recorded_calls[0]["flow"] == LLMFlow.IMAGE_SUMMARIZATION.value
+
+
+def test_records_unknown_non_user_flow_as_unattributed(
+    processor: UserUsageTracingProcessor, recorded_calls: list[dict[str, Any]]
+) -> None:
+    processor.on_span_end(_generation_span(flow="unknown", usage={"input_tokens": 5}))
+    processor.force_flush()
+    assert len(recorded_calls) == 1
+    assert recorded_calls[0]["attribution"] == SystemUsageAttribution.UNATTRIBUTED
+
+
+def test_ignores_non_user_generation_without_token_usage(
+    processor: UserUsageTracingProcessor, recorded_calls: list[dict[str, Any]]
+) -> None:
+    processor.on_span_end(
+        _fake_span(
+            GenerationSpanData(
+                model="dall-e-3",
+                model_config={"flow": LLMFlow.IMAGE_GENERATION.value},
+                image_count=1,
+            )
+        )
+    )
     processor.force_flush()
     assert recorded_calls == []
 
@@ -317,6 +351,7 @@ def test_passes_cache_inclusive_usage_to_shared_pricing(
 
     monkeypatch.setattr(proc_mod, "compute_cost_cents", _capture_cost)
     monkeypatch.setattr(proc_mod, "record_user_usage", _capture_record)
+    monkeypatch.setattr(proc_mod, "record_system_usage", _capture_record)
 
     p = UserUsageTracingProcessor(flush_interval_seconds=0.05)
     try:

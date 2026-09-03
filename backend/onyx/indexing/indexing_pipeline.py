@@ -59,6 +59,8 @@ from onyx.document_index.interfaces_new import (
     DocumentInsertionRecord,
     IndexingMetadata,
 )
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_processing.image_summarization import summarize_image_with_error_handling
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.staging import promote_staged_file
@@ -103,6 +105,7 @@ from onyx.prompts.contextual_retrieval import (
     CONTEXTUAL_RAG_PROMPT2,
     DOCUMENT_SUMMARY_PROMPT,
 )
+from onyx.server.query_and_chat.token_limit import check_global_token_rate_limits
 from onyx.tracing.flows import LLMFlow
 from onyx.tracing.llm_utils import llm_generation_span, record_llm_response
 from onyx.utils.batching import batch_generator
@@ -421,6 +424,7 @@ def index_doc_batch_with_handler(
     index_to_secondary: bool = False,
     from_beginning: bool = False,
     enable_contextual_rag: bool = False,
+    llm_enrichment_allowed: bool = True,
     llm: LLM | None = None,
 ) -> IndexingPipelineResult:
     try:
@@ -436,6 +440,7 @@ def index_doc_batch_with_handler(
             index_to_secondary=index_to_secondary,
             from_beginning=from_beginning,
             enable_contextual_rag=enable_contextual_rag,
+            llm_enrichment_allowed=llm_enrichment_allowed,
             llm=llm,
         )
 
@@ -721,6 +726,42 @@ def filter_documents(
     return documents, failures
 
 
+def _convert_documents_without_image_summaries(
+    documents: list[Document],
+) -> list[IndexingDocument]:
+    return [
+        IndexingDocument(
+            **document.model_dump(),
+            processed_sections=[
+                (
+                    Section(
+                        type=section.type,
+                        text="",
+                        link=section.link,
+                        image_file_id=section.image_file_id,
+                        heading=section.heading,
+                    )
+                    if isinstance(section, ImageSection)
+                    else section.model_copy()
+                )
+                for section in document.sections
+            ],
+        )
+        for document in documents
+    ]
+
+
+def _system_llm_enrichment_is_allowed() -> bool:
+    try:
+        check_global_token_rate_limits()
+    except OnyxError as error:
+        if error.error_code != OnyxErrorCode.RATE_LIMITED:
+            raise
+        logger.warning("Skipping optional indexing LLM enrichment: %s", error.detail)
+        return False
+    return True
+
+
 def process_image_sections(documents: list[Document]) -> list[IndexingDocument]:
     """
     Process all sections in documents by:
@@ -755,27 +796,7 @@ def process_image_sections(documents: list[Document]) -> list[IndexingDocument]:
                 "available — images will not be summarized. Configure a "
                 "vision model in the admin LLM settings."
             )
-        # Even without LLM, we still convert to IndexingDocument with base Sections
-        return [
-            IndexingDocument(
-                **document.model_dump(),
-                processed_sections=[
-                    (
-                        Section(
-                            type=section.type,
-                            text="",
-                            link=section.link,
-                            image_file_id=section.image_file_id,
-                            heading=section.heading,
-                        )
-                        if isinstance(section, ImageSection)
-                        else section.model_copy()
-                    )
-                    for section in document.sections
-                ],
-            )
-            for document in documents
-        ]
+        return _convert_documents_without_image_summaries(documents)
 
     indexed_documents: list[IndexingDocument] = []
     # Sections that need LLM summarization, paired with their image data.
@@ -1278,6 +1299,7 @@ def index_doc_batch(
     tenant_id: str,
     adapter: IndexingBatchAdapter,
     enable_contextual_rag: bool = False,
+    llm_enrichment_allowed: bool = True,
     llm: LLM | None = None,
     ignore_time_skip: bool = False,
     index_to_secondary: bool = False,
@@ -1338,7 +1360,11 @@ def index_doc_batch(
     )
     if has_image_section:
         with time_stage_if_set(IndexAttemptStage.IMAGE_PROCESSING, attempt_id):
-            context.indexable_docs = process_image_sections(context.updatable_docs)
+            context.indexable_docs = (
+                process_image_sections(context.updatable_docs)
+                if llm_enrichment_allowed
+                else _convert_documents_without_image_summaries(context.updatable_docs)
+            )
     else:
         context.indexable_docs = process_image_sections(context.updatable_docs)
 
@@ -1359,7 +1385,7 @@ def index_doc_batch(
     llm_tokenizer: BaseTokenizer | None = None
 
     # contextual RAG
-    if enable_contextual_rag:
+    if enable_contextual_rag and llm_enrichment_allowed:
         assert llm is not None, "must provide an LLM for contextual RAG"
         llm_tokenizer = get_tokenizer(
             model_name=llm.config.model_name,
@@ -1568,6 +1594,13 @@ def run_indexing_pipeline(
     enable_contextual_rag = (
         search_settings.enable_contextual_rag or ENABLE_CONTEXTUAL_RAG
     )
+    llm_enrichment_configured = (
+        enable_contextual_rag or get_image_extraction_and_analysis_enabled()
+    )
+    llm_enrichment_allowed = (
+        not llm_enrichment_configured or _system_llm_enrichment_is_allowed()
+    )
+    enable_contextual_rag = enable_contextual_rag and llm_enrichment_allowed
     llm = None
     if enable_contextual_rag:
         llm = get_contextual_rag_llm_for_search_settings(search_settings)
@@ -1589,6 +1622,7 @@ def run_indexing_pipeline(
         tenant_id=tenant_id,
         adapter=adapter,
         enable_contextual_rag=enable_contextual_rag,
+        llm_enrichment_allowed=llm_enrichment_allowed,
         llm=llm,
         ignore_time_skip=ignore_time_skip,
         index_to_secondary=index_to_secondary,

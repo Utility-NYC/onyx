@@ -40,6 +40,9 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         with self._lock:
             self._processors = tuple(processors)
 
+    def has_processors(self) -> bool:
+        return bool(self._processors)
+
     def on_trace_start(self, trace: Trace) -> None:
         """
         Called when a trace is started.
@@ -176,18 +179,24 @@ class TraceProvider(ABC):
 class DefaultTraceProvider(TraceProvider):
     def __init__(self) -> None:
         self._multi_processor = SynchronousMultiTracingProcessor()
+        self._without_trace_processor = SynchronousMultiTracingProcessor()
 
     def register_processor(self, processor: TracingProcessor) -> None:
         """
         Add a processor to the list of processors. Each processor will receive all traces/spans.
         """
         self._multi_processor.add_tracing_processor(processor)
+        if processor.process_without_trace:
+            self._without_trace_processor.add_tracing_processor(processor)
 
     def set_processors(self, processors: list[TracingProcessor]) -> None:
         """
         Set the list of processors. This will replace the current list of processors.
         """
         self._multi_processor.set_processors(processors)
+        self._without_trace_processor.set_processors(
+            [processor for processor in processors if processor.process_without_trace]
+        )
 
     def get_current_trace(self) -> Trace | None:
         """
@@ -265,12 +274,18 @@ class DefaultTraceProvider(TraceProvider):
             current_span = Scope.get_current_span()
             current_trace = Scope.get_current_trace()
             if current_trace is None:
-                # Expected when tracing is disabled or a caller creates a span
-                # outside an active trace context (e.g. celery tasks with
-                # SENTRY_CELERY_TRACES_SAMPLE_RATE=0). Fall through to NoOpSpan
-                # silently — matches the other no-op branches below.
-                logger.debug("No active trace; returning NoOpSpan for %s", span_data)
-                return NoOpSpan(span_data)
+                if not self._without_trace_processor.has_processors():
+                    logger.debug(
+                        "No active trace; returning NoOpSpan for %s", span_data
+                    )
+                    return NoOpSpan(span_data)
+                return SpanImpl(
+                    trace_id=self.gen_trace_id(),
+                    span_id=span_id or self.gen_span_id(),
+                    parent_id=None,
+                    processor=self._without_trace_processor,
+                    span_data=span_data,
+                )
             elif isinstance(current_trace, NoOpTrace) or isinstance(
                 current_span, NoOpSpan
             ):

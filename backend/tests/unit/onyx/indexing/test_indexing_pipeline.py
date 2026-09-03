@@ -14,6 +14,8 @@ from onyx.connectors.models import (
     TabularSection,
     TextSection,
 )
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.hooks.executor import HookSkipped, HookSoftFailed
 from onyx.hooks.points.document_ingestion import (
     DocumentIngestionResponse,
@@ -23,6 +25,7 @@ from onyx.indexing.chunker import Chunker
 from onyx.indexing.embedder import DefaultIndexingEmbedder
 from onyx.indexing.indexing_pipeline import (
     _apply_document_ingestion_hook,
+    _system_llm_enrichment_is_allowed,
     add_contextual_summaries,
     filter_documents,
     get_docs_to_update,
@@ -654,6 +657,14 @@ def test_document_ingestion_hook_mixed_batch() -> None:
 # ---------------------------------------------------------------------------
 
 _PATCH_PREFIX = "onyx.indexing.indexing_pipeline"
+
+
+def test_system_llm_enrichment_stops_at_global_limit() -> None:
+    with patch(
+        f"{_PATCH_PREFIX}.check_global_token_rate_limits",
+        side_effect=OnyxError(OnyxErrorCode.RATE_LIMITED),
+    ):
+        assert not _system_llm_enrichment_is_allowed()
 
 
 def _mock_file_store(image_map: dict[str, bytes]) -> MagicMock:

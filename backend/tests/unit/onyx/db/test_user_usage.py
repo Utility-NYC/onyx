@@ -23,7 +23,9 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 
 import onyx.db.user_usage as user_usage_module
+from onyx.db.enums import SystemUsageAttribution
 from onyx.db.models import (
+    SystemUsage,
     TokenRateLimit,
     TokenRateLimitScope,
     User__UserGroup,
@@ -119,6 +121,31 @@ def _seed_usage(
     db_session.flush()
 
 
+def _seed_system_usage(
+    db_session: Session,
+    window_start: datetime.datetime,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cost_cents: float,
+) -> None:
+    db_session.add(
+        SystemUsage(
+            attribution=SystemUsageAttribution.SYSTEM,
+            window_start=window_start,
+            model="m",
+            flow="image_summarization",
+            provider="anthropic",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=0,
+            cache_creation_tokens=0,
+            cost_cents=cost_cents,
+        )
+    )
+    db_session.flush()
+
+
 @pytest.fixture
 def db_session() -> Generator[Session, None, None]:
     engine: Engine = create_engine("sqlite://")
@@ -136,6 +163,7 @@ def db_session() -> Generator[Session, None, None]:
             'CREATE TABLE "user" (id CHAR(36) PRIMARY KEY, email VARCHAR)'
         )
     cast(Table, UserUsage.__table__).create(bind=engine)
+    cast(Table, SystemUsage.__table__).create(bind=engine)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     try:
@@ -463,6 +491,15 @@ class TestTotalCostSince:
 
         assert get_total_cost_cents_since(db_session, window) == pytest.approx(7.0)
 
+    def test_includes_system_usage(self, db_session: Session) -> None:
+        window = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc)
+        _seed_usage(db_session, str(uuid4()), "m", "CHAT", None, 1, 1, 0, 3.0, window)
+        _seed_system_usage(
+            db_session, window, input_tokens=5, output_tokens=2, cost_cents=4.0
+        )
+
+        assert get_total_cost_cents_since(db_session, window) == pytest.approx(7.0)
+
     def test_older_window_excluded(self, db_session: Session) -> None:
         u1 = str(uuid4())
         w1 = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc)
@@ -503,6 +540,16 @@ class TestTotalCostBucketsSince:
         assert buckets[w1] == pytest.approx(7.0)
         assert buckets[w2] == pytest.approx(9.0)
 
+    def test_includes_system_usage(self, db_session: Session) -> None:
+        window = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc)
+        _seed_system_usage(
+            db_session, window, input_tokens=5, output_tokens=2, cost_cents=4.0
+        )
+
+        assert dict(get_total_cost_cents_buckets_since(db_session, window))[
+            window
+        ] == pytest.approx(4.0)
+
 
 class TestTokenBuckets:
     def test_user_tokens_are_provider_input_plus_output(
@@ -527,6 +574,16 @@ class TestTokenBuckets:
 
         assert get_total_token_buckets_since(db_session, window) == [
             TokenUsageBucket(window_start=window, tokens=180)
+        ]
+
+    def test_total_tokens_include_system_usage(self, db_session: Session) -> None:
+        window = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc)
+        _seed_system_usage(
+            db_session, window, input_tokens=50, output_tokens=10, cost_cents=1.0
+        )
+
+        assert get_total_token_buckets_since(db_session, window) == [
+            TokenUsageBucket(window_start=window, tokens=60)
         ]
 
 

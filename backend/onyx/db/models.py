@@ -117,6 +117,7 @@ from onyx.db.enums import (
     SwitchoverType,
     SyncStatus,
     SyncType,
+    SystemUsageAttribution,
     TaskStatus,
     ThemePreference,
     UserFileStatus,
@@ -6249,6 +6250,61 @@ class UserUsage(Base):
             "flow",
             "provider",
             "incognito",
+            unique=True,
+        ),
+    )
+
+
+class SystemUsage(Base):
+    """Daily LLM usage without a user principal."""
+
+    __tablename__ = "system_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attribution: Mapped[SystemUsageAttribution] = mapped_column(
+        Enum(SystemUsageAttribution, native_enum=False), nullable=False
+    )
+    window_start: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    flow: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(
+        String, nullable=False, default="", server_default=""
+    )
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cache_read_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    cache_creation_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    cost_cents: Mapped[float] = mapped_column(
+        Numeric(18, 6, asdecimal=False), nullable=False, default=0.0
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "attribution IN ('SYSTEM', 'UNATTRIBUTED')",
+            name="ck_system_usage_attribution",
+        ),
+        Index(
+            "uq_system_usage_dims",
+            "attribution",
+            "window_start",
+            "model",
+            "flow",
+            "provider",
             unique=True,
         ),
     )

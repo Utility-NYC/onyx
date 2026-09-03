@@ -50,6 +50,8 @@ class TracingProcessor(abc.ABC):
         - Handle errors gracefully to prevent disrupting agent execution
     """
 
+    process_without_trace = False
+
     @abc.abstractmethod
     def on_trace_start(self, trace: "Trace") -> None:
         """Called when a new trace begins execution.
