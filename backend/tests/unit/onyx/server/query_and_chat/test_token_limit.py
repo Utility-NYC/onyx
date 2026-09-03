@@ -17,7 +17,7 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 
 import onyx.server.query_and_chat.token_limit as token_limit
-from onyx.db.models import SystemUsage, TokenRateLimit, TokenRateLimitScope, UserUsage
+from onyx.db.models import TokenRateLimit, TokenRateLimitScope, UserUsage
 from onyx.db.user_usage import (
     TokenUsageBucket,
     get_cost_window_reset,
@@ -498,7 +498,6 @@ class _RealLedgerSessionCtx:
 def ledger_session() -> Generator[Session, None, None]:
     engine: Engine = create_engine("sqlite://")
     cast(Table, UserUsage.__table__).create(bind=engine)
-    cast(Table, SystemUsage.__table__).create(bind=engine)
     session = sessionmaker(bind=engine)()
     try:
         yield session

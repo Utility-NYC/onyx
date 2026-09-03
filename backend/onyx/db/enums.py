@@ -770,6 +770,11 @@ class SystemUsageAttribution(str, PyEnum):
     UNATTRIBUTED = "UNATTRIBUTED"
 
 
+class UsageActorKind(str, PyEnum):
+    USER = "USER"
+    SYSTEM = "SYSTEM"
+
+
 class IncognitoRecordMode(str, PyEnum):
     """What a workspace retains from an incognito chat.
 

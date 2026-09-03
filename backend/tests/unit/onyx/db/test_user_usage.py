@@ -23,9 +23,8 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 
 import onyx.db.user_usage as user_usage_module
-from onyx.db.enums import SystemUsageAttribution
+from onyx.db.enums import SystemUsageAttribution, UsageActorKind
 from onyx.db.models import (
-    SystemUsage,
     TokenRateLimit,
     TokenRateLimitScope,
     User__UserGroup,
@@ -130,12 +129,15 @@ def _seed_system_usage(
     cost_cents: float,
 ) -> None:
     db_session.add(
-        SystemUsage(
-            attribution=SystemUsageAttribution.SYSTEM,
+        UserUsage(
+            user_id=None,
+            actor_kind=UsageActorKind.SYSTEM,
+            system_attribution=SystemUsageAttribution.SYSTEM,
             window_start=window_start,
             model="m",
             flow="image_summarization",
             provider="anthropic",
+            incognito=False,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=0,
@@ -163,7 +165,6 @@ def db_session() -> Generator[Session, None, None]:
             'CREATE TABLE "user" (id CHAR(36) PRIMARY KEY, email VARCHAR)'
         )
     cast(Table, UserUsage.__table__).create(bind=engine)
-    cast(Table, SystemUsage.__table__).create(bind=engine)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     try:
@@ -286,6 +287,16 @@ class TestRecordUserUsage:
 
 
 class TestUsageExport:
+    def test_system_usage_is_excluded(self, db_session: Session) -> None:
+        window = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc)
+        _seed_system_usage(
+            db_session, window, input_tokens=20, output_tokens=7, cost_cents=4.0
+        )
+
+        rows = get_usage_export(db_session, window, window + datetime.timedelta(days=1))
+
+        assert rows == []
+
     def test_orphaned_usage_is_exported_and_reconciles_with_total(
         self, db_session: Session
     ) -> None:

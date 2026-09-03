@@ -12,17 +12,13 @@ from typing import Any, cast
 
 from cachetools import TTLCache
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.orm import Session
 
+from onyx.db.enums import UsageActorKind
 from onyx.db.models import TokenRateLimit, User, User__UserGroup, UserUsage
-from onyx.db.system_usage import (
-    get_system_cost_cents_buckets_since,
-    get_system_cost_cents_since,
-    get_system_token_buckets_since,
-)
 from onyx.utils.datetime import datetime_to_utc, get_window_start
 from onyx.utils.logger import setup_logger
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
@@ -44,6 +40,7 @@ _invalid_cost_budget_warning_cache: TTLCache[tuple[str | None, int, int], None] 
 # Not email-shaped on purpose: it can never collide with a real address.
 DELETED_USER_EXPORT_EMAIL = "(deleted user)"
 _CONFLICT_COLS = ["user_id", "window_start", "model", "flow", "provider", "incognito"]
+_USER_ACTOR_INDEX_PREDICATE = text("actor_kind = 'USER'")
 
 
 class TokenUsageBucket(BaseModel):
@@ -212,6 +209,7 @@ def record_user_usage(
     provider = provider or ""
     stmt = pg_insert(UserUsage).values(
         user_id=user_id,
+        actor_kind=UsageActorKind.USER,
         window_start=window_start,
         model=model,
         flow=flow,
@@ -225,6 +223,7 @@ def record_user_usage(
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=_CONFLICT_COLS,
+        index_where=_USER_ACTOR_INDEX_PREDICATE,
         set_={
             "input_tokens": UserUsage.input_tokens + stmt.excluded.input_tokens,
             "output_tokens": UserUsage.output_tokens + stmt.excluded.output_tokens,
@@ -316,6 +315,7 @@ def _get_usage_export_query(
         # base, which ty resolves as a plain value rather than a column.
         .outerjoin(User, UserUsage.user_id == User.id)
         .where(
+            UserUsage.actor_kind == UsageActorKind.USER,
             UserUsage.window_start >= start,
             UserUsage.window_start < end,
         )
@@ -478,12 +478,12 @@ def get_total_cost_cents_since(
     cutoff: datetime,
 ) -> float:
     """Tenant-wide cost (cents) in ledger windows >= `cutoff` — global cost budgets."""
-    user_total = db_session.execute(
+    total = db_session.execute(
         select(func.coalesce(func.sum(UserUsage.cost_cents), 0.0)).where(
             UserUsage.window_start >= cutoff,
         )
     ).scalar_one()
-    return float(user_total) + get_system_cost_cents_since(db_session, cutoff)
+    return float(total)
 
 
 def get_total_cost_cents_buckets_since(
@@ -491,7 +491,7 @@ def get_total_cost_cents_buckets_since(
     cutoff: datetime,
 ) -> list[tuple[datetime, float]]:
     """Tenant-wide per-window cost buckets for multi-period global budgets."""
-    user_rows = db_session.execute(
+    rows = db_session.execute(
         select(
             UserUsage.window_start,
             func.coalesce(func.sum(UserUsage.cost_cents), 0.0),
@@ -499,12 +499,7 @@ def get_total_cost_cents_buckets_since(
         .where(UserUsage.window_start >= cutoff)
         .group_by(UserUsage.window_start)
     ).all()
-    totals = {
-        datetime_to_utc(window_start): float(cost) for window_start, cost in user_rows
-    }
-    for window_start, cost in get_system_cost_cents_buckets_since(db_session, cutoff):
-        totals[window_start] = totals.get(window_start, 0.0) + cost
-    return sorted(totals.items())
+    return [(datetime_to_utc(window_start), float(cost)) for window_start, cost in rows]
 
 
 def get_group_cost_cents_since(
@@ -576,7 +571,7 @@ def get_total_token_buckets_since(
     cutoff: datetime,
 ) -> list[TokenUsageBucket]:
     """Tenant-wide provider input + output tokens across all recorded flows."""
-    user_rows = db_session.execute(
+    rows = db_session.execute(
         select(
             UserUsage.window_start,
             func.sum(UserUsage.input_tokens + UserUsage.output_tokens),
@@ -585,14 +580,9 @@ def get_total_token_buckets_since(
         .group_by(UserUsage.window_start)
         .order_by(UserUsage.window_start)
     ).all()
-    totals = {
-        datetime_to_utc(window_start): int(tokens) for window_start, tokens in user_rows
-    }
-    for bucket in get_system_token_buckets_since(db_session, cutoff):
-        totals[bucket.window_start] = totals.get(bucket.window_start, 0) + bucket.tokens
     return [
-        TokenUsageBucket(window_start=window_start, tokens=tokens)
-        for window_start, tokens in sorted(totals.items())
+        TokenUsageBucket(window_start=datetime_to_utc(window_start), tokens=int(tokens))
+        for window_start, tokens in rows
     ]
 
 

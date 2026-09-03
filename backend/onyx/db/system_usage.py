@@ -1,21 +1,22 @@
 from datetime import datetime
 
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from onyx.db.enums import SystemUsageAttribution
-from onyx.db.models import SystemUsage
+from onyx.db.enums import SystemUsageAttribution, UsageActorKind
+from onyx.db.models import UserUsage
 from onyx.utils.datetime import datetime_to_utc
 
 _CONFLICT_COLUMNS = [
-    "attribution",
+    "system_attribution",
     "window_start",
     "model",
     "flow",
     "provider",
 ]
+_SYSTEM_ACTOR_INDEX_PREDICATE = text("actor_kind = 'SYSTEM'")
 
 
 class SystemTokenUsageBucket(BaseModel):
@@ -38,12 +39,15 @@ def record_system_usage(
     cache_creation_tokens: int = 0,
 ) -> None:
     """Accumulate one non-user generation into its daily rollup."""
-    statement = pg_insert(SystemUsage).values(
-        attribution=attribution,
+    statement = pg_insert(UserUsage).values(
+        user_id=None,
+        actor_kind=UsageActorKind.SYSTEM,
+        system_attribution=attribution,
         window_start=window_start,
         model=model,
         flow=flow,
         provider=provider or "",
+        incognito=False,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
@@ -52,19 +56,20 @@ def record_system_usage(
     )
     statement = statement.on_conflict_do_update(
         index_elements=_CONFLICT_COLUMNS,
+        index_where=_SYSTEM_ACTOR_INDEX_PREDICATE,
         set_={
-            "input_tokens": SystemUsage.input_tokens + statement.excluded.input_tokens,
+            "input_tokens": UserUsage.input_tokens + statement.excluded.input_tokens,
             "output_tokens": (
-                SystemUsage.output_tokens + statement.excluded.output_tokens
+                UserUsage.output_tokens + statement.excluded.output_tokens
             ),
             "cache_read_tokens": (
-                SystemUsage.cache_read_tokens + statement.excluded.cache_read_tokens
+                UserUsage.cache_read_tokens + statement.excluded.cache_read_tokens
             ),
             "cache_creation_tokens": (
-                SystemUsage.cache_creation_tokens
+                UserUsage.cache_creation_tokens
                 + statement.excluded.cache_creation_tokens
             ),
-            "cost_cents": SystemUsage.cost_cents + statement.excluded.cost_cents,
+            "cost_cents": UserUsage.cost_cents + statement.excluded.cost_cents,
         },
     )
     db_session.execute(statement)
@@ -73,8 +78,9 @@ def record_system_usage(
 
 def get_system_cost_cents_since(db_session: Session, cutoff: datetime) -> float:
     total = db_session.scalar(
-        select(func.coalesce(func.sum(SystemUsage.cost_cents), 0.0)).where(
-            SystemUsage.window_start >= cutoff
+        select(func.coalesce(func.sum(UserUsage.cost_cents), 0.0)).where(
+            UserUsage.actor_kind == UsageActorKind.SYSTEM,
+            UserUsage.window_start >= cutoff,
         )
     )
     return float(total or 0.0)
@@ -85,11 +91,14 @@ def get_system_cost_cents_buckets_since(
 ) -> list[tuple[datetime, float]]:
     rows = db_session.execute(
         select(
-            SystemUsage.window_start,
-            func.coalesce(func.sum(SystemUsage.cost_cents), 0.0),
+            UserUsage.window_start,
+            func.coalesce(func.sum(UserUsage.cost_cents), 0.0),
         )
-        .where(SystemUsage.window_start >= cutoff)
-        .group_by(SystemUsage.window_start)
+        .where(
+            UserUsage.actor_kind == UsageActorKind.SYSTEM,
+            UserUsage.window_start >= cutoff,
+        )
+        .group_by(UserUsage.window_start)
     ).all()
     return [(datetime_to_utc(window_start), float(cost)) for window_start, cost in rows]
 
@@ -99,12 +108,15 @@ def get_system_token_buckets_since(
 ) -> list[SystemTokenUsageBucket]:
     rows = db_session.execute(
         select(
-            SystemUsage.window_start,
-            func.sum(SystemUsage.input_tokens + SystemUsage.output_tokens),
+            UserUsage.window_start,
+            func.sum(UserUsage.input_tokens + UserUsage.output_tokens),
         )
-        .where(SystemUsage.window_start >= cutoff)
-        .group_by(SystemUsage.window_start)
-        .order_by(SystemUsage.window_start)
+        .where(
+            UserUsage.actor_kind == UsageActorKind.SYSTEM,
+            UserUsage.window_start >= cutoff,
+        )
+        .group_by(UserUsage.window_start)
+        .order_by(UserUsage.window_start)
     ).all()
     return [
         SystemTokenUsageBucket(

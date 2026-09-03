@@ -120,6 +120,7 @@ from onyx.db.enums import (
     SystemUsageAttribution,
     TaskStatus,
     ThemePreference,
+    UsageActorKind,
     UserFileStatus,
 )
 from onyx.db.index_attempt_metrics_models import IndexAttemptStage
@@ -6185,10 +6186,10 @@ class TenantUsage(Base):
 
 class UserUsage(Base):
     """
-    Daily per-user LLM usage rollup for cost/token attribution and budget checks.
+    Daily LLM usage rollup for cost/token attribution and budget checks.
 
-    One accumulating row per (user, window, model, flow, provider, incognito),
-    not per call.
+    User and system usage share this ledger. Partial unique indexes provide the
+    different accumulation keys each actor kind requires.
     """
 
     __tablename__ = "user_usage"
@@ -6198,6 +6199,15 @@ class UserUsage(Base):
     # No index=True: uq_user_usage_dims (user_id-first) covers user-only lookups.
     user_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_kind: Mapped[UsageActorKind] = mapped_column(
+        Enum(UsageActorKind, native_enum=False),
+        nullable=False,
+        default=UsageActorKind.USER,
+        server_default=UsageActorKind.USER.value,
+    )
+    system_attribution: Mapped[SystemUsageAttribution | None] = mapped_column(
+        Enum(SystemUsageAttribution, native_enum=False), nullable=True
     )
 
     window_start: Mapped[datetime.datetime] = mapped_column(
@@ -6239,9 +6249,12 @@ class UserUsage(Base):
     )
 
     __table_args__ = (
-        # Upsert key: accumulate into one row per dimension tuple per window.
-        # provider is non-null ('' when absent), so a plain unique index dedups
-        # correctly on every Postgres version (no NULLS NOT DISTINCT needed).
+        CheckConstraint(
+            "(actor_kind = 'USER' AND system_attribution IS NULL) OR "
+            "(actor_kind = 'SYSTEM' AND user_id IS NULL "
+            "AND system_attribution IS NOT NULL AND incognito = false)",
+            name="ck_user_usage_actor",
+        ),
         Index(
             "uq_user_usage_dims",
             "user_id",
@@ -6251,61 +6264,17 @@ class UserUsage(Base):
             "provider",
             "incognito",
             unique=True,
-        ),
-    )
-
-
-class SystemUsage(Base):
-    """Daily LLM usage without a user principal."""
-
-    __tablename__ = "system_usage"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    attribution: Mapped[SystemUsageAttribution] = mapped_column(
-        Enum(SystemUsageAttribution, native_enum=False), nullable=False
-    )
-    window_start: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
-    model: Mapped[str] = mapped_column(String, nullable=False)
-    flow: Mapped[str] = mapped_column(String, nullable=False)
-    provider: Mapped[str] = mapped_column(
-        String, nullable=False, default="", server_default=""
-    )
-    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    cache_read_tokens: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0
-    )
-    cache_creation_tokens: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0
-    )
-    cost_cents: Mapped[float] = mapped_column(
-        Numeric(18, 6, asdecimal=False), nullable=False, default=0.0
-    )
-    created_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    updated_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "attribution IN ('SYSTEM', 'UNATTRIBUTED')",
-            name="ck_system_usage_attribution",
+            postgresql_where=text("actor_kind = 'USER'"),
         ),
         Index(
             "uq_system_usage_dims",
-            "attribution",
+            "system_attribution",
             "window_start",
             "model",
             "flow",
             "provider",
             unique=True,
+            postgresql_where=text("actor_kind = 'SYSTEM'"),
         ),
     )
 
