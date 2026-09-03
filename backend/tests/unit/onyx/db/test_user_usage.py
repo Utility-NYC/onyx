@@ -132,7 +132,7 @@ def _seed_system_usage(
         UserUsage(
             user_id=None,
             actor_kind=UsageActorKind.SYSTEM,
-            system_attribution=SystemUsageAttribution.SYSTEM,
+            system_attribution=SystemUsageAttribution.ATTRIBUTED,
             window_start=window_start,
             model="m",
             flow="image_summarization",

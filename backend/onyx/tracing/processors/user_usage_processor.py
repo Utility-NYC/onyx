@@ -83,7 +83,7 @@ def _system_attribution(flow: str) -> SystemUsageAttribution:
     except ValueError:
         return SystemUsageAttribution.UNATTRIBUTED
     if llm_flow in SYSTEM_TEXT_GENERATION_FLOWS:
-        return SystemUsageAttribution.SYSTEM
+        return SystemUsageAttribution.ATTRIBUTED
     return SystemUsageAttribution.UNATTRIBUTED
 
 

@@ -211,7 +211,7 @@ def test_records_system_usage_when_user_id_unset(
     )
     processor.force_flush()
     assert len(recorded_calls) == 1
-    assert recorded_calls[0]["attribution"] == SystemUsageAttribution.SYSTEM
+    assert recorded_calls[0]["attribution"] == SystemUsageAttribution.ATTRIBUTED
     assert recorded_calls[0]["flow"] == LLMFlow.IMAGE_SUMMARIZATION.value
 
 

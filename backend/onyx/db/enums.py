@@ -766,7 +766,7 @@ class SSOProviderType(str, PyEnum):
 
 
 class SystemUsageAttribution(str, PyEnum):
-    SYSTEM = "SYSTEM"
+    ATTRIBUTED = "ATTRIBUTED"
     UNATTRIBUTED = "UNATTRIBUTED"
 
 
